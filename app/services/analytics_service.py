@@ -1,0 +1,363 @@
+﻿
+
+# app/services/analytics_service.py
+
+from pathlib import Path
+import json
+import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+
+
+def load_processed_dataset(
+    dataset_type: str,
+    filename: str | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """Load a selected processed CSV or the most recently updated matching CSV."""
+
+    patterns = {
+        "sales": "*sales*cleaned.csv",
+        "customer_feedback": "*customer_feedback*cleaned.csv",
+    }
+
+    if dataset_type not in patterns:
+        raise ValueError(f"Unsupported dataset type: {dataset_type}")
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    if filename:
+        # Prevent paths outside the processed-data directory.
+        if Path(filename).name != filename:
+            raise ValueError("Please provide a filename, not a file path.")
+
+        path = PROCESSED_DIR / filename
+
+        if not path.is_file() or path.suffix.lower() != ".csv":
+            raise FileNotFoundError(
+                f"Processed CSV not found: {filename}"
+            )
+
+        if not any(path.match(pattern) for pattern in patterns.values()):
+            raise ValueError(
+                "The selected file is not a recognized processed dataset."
+            )
+    else:
+        matches = list(PROCESSED_DIR.glob(patterns[dataset_type]))
+
+        if not matches:
+            raise FileNotFoundError(
+                f"No processed {dataset_type} CSV found in {PROCESSED_DIR}"
+            )
+
+        path = max(matches, key=lambda item: item.stat().st_mtime)
+
+    df = pd.read_csv(path)
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r"[\s\-]+", "_", regex=True)
+    )
+
+    if df.empty:
+        raise ValueError(f"The processed file {path.name} contains no rows.")
+
+    return df, path.name
+
+
+def _number(value) -> float:
+    """Convert a value to a JSON-friendly number."""
+    return round(float(value), 2)
+
+
+def _records(df: pd.DataFrame) -> list[dict]:
+    """Convert a DataFrame to JSON-compatible records."""
+    return json.loads(
+        df.to_json(orient="records", date_format="iso")
+    )
+
+
+def _require_columns(
+    df: pd.DataFrame,
+    required: list[str],
+) -> None:
+    missing = [column for column in required if column not in df.columns]
+
+    if missing:
+        raise ValueError(
+            f"Missing required columns: {', '.join(missing)}. "
+            f"Available columns: {', '.join(df.columns)}"
+        )
+
+
+def _group_totals(
+    df: pd.DataFrame,
+    group_column: str,
+) -> list[dict]:
+    result = (
+        df.groupby(group_column, dropna=False)
+        .agg(
+            order_count=("order_id", "nunique"),
+            units_sold=("quantity", "sum"),
+            revenue=("revenue", "sum"),
+            total_cost=("total_cost", "sum"),
+            profit=("profit", "sum"),
+        )
+        .reset_index()
+        .sort_values("revenue", ascending=False)
+    )
+
+    result["profit_margin_percent"] = (
+        result["profit"]
+        .div(result["revenue"].where(result["revenue"] != 0))
+        .mul(100)
+        .fillna(0)
+        .round(2)
+    )
+
+    return _records(result)
+
+
+def _find_revenue_anomalies(df: pd.DataFrame) -> list[dict]:
+    """Flag unusual individual order revenues using the IQR rule."""
+
+    if len(df) < 4:
+        return []
+
+    q1 = df["revenue"].quantile(0.25)
+    q3 = df["revenue"].quantile(0.75)
+    iqr = q3 - q1
+
+    if iqr == 0:
+        return []
+
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+
+    unusual = df[
+        (df["revenue"] < lower_bound)
+        | (df["revenue"] > upper_bound)
+    ].copy()
+
+    if unusual.empty:
+        return []
+
+    columns = [
+        column
+        for column in [
+            "order_id",
+            "order_date",
+            "region",
+            "product",
+            "revenue",
+        ]
+        if column in unusual.columns
+    ]
+
+    unusual["anomaly_type"] = unusual["revenue"].apply(
+        lambda value: (
+            "unusually_low"
+            if value < lower_bound
+            else "unusually_high"
+        )
+    )
+
+    return _records(
+        unusual[columns + ["anomaly_type"]].sort_values(
+            "revenue", ascending=False
+        )
+    )
+
+
+def get_sales_analytics(
+    filename: str | None = None,
+) -> dict:
+    df, source_file = load_processed_dataset("sales", filename)
+
+    _require_columns(
+        df,
+        [
+            "order_id",
+            "order_date",
+            "region",
+            "product",
+            "quantity",
+            "revenue",
+            "total_cost",
+            "profit",
+        ],
+    )
+
+    # Convert the fields used by the KPI calculations.
+    for column in [
+        "quantity",
+        "revenue",
+        "total_cost",
+        "profit",
+    ]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
+    df["order_date"] = pd.to_datetime(
+        df["order_date"], errors="coerce"
+    )
+
+    # Exclude rows without valid financial measures from financial KPIs.
+    financial = df.dropna(
+        subset=["quantity", "revenue", "total_cost", "profit"]
+    ).copy()
+
+    if financial.empty:
+        raise ValueError("No rows contain valid financial measures.")
+
+    total_revenue = financial["revenue"].sum()
+    total_cost = financial["total_cost"].sum()
+    total_profit = financial["profit"].sum()
+    order_count = int(financial["order_id"].nunique())
+
+    total_units = financial["quantity"].sum()
+    profit_margin = (
+        total_profit / total_revenue * 100
+        if total_revenue
+        else 0
+    )
+
+    # Group data by month. Rows with invalid dates are excluded here.
+    dated = financial.dropna(subset=["order_date"]).copy()
+    dated["month"] = dated["order_date"].dt.to_period("M").astype(str)
+
+    monthly = (
+        dated.groupby("month")
+        .agg(
+            order_count=("order_id", "nunique"),
+            revenue=("revenue", "sum"),
+            total_cost=("total_cost", "sum"),
+            profit=("profit", "sum"),
+        )
+        .reset_index()
+        .sort_values("month")
+    )
+
+    monthly["profit_margin_percent"] = (
+        monthly["profit"]
+        .div(monthly["revenue"].where(monthly["revenue"] != 0))
+        .mul(100)
+        .fillna(0)
+        .round(2)
+    )
+
+    return {
+        "status": "success",
+        "source_file": source_file,
+        "data_quality": {
+            "source_rows": int(len(df)),
+            "rows_used_for_financial_kpis": int(len(financial)),
+            "rows_excluded_from_financial_kpis": int(
+                len(df) - len(financial)
+            ),
+            "rows_with_invalid_dates": int(
+                financial["order_date"].isna().sum()
+            ),
+        },
+        "kpis": {
+            "total_revenue": _number(total_revenue),
+            "total_cost": _number(total_cost),
+            "total_profit": _number(total_profit),
+            "profit_margin_percent": _number(profit_margin),
+            "order_count": order_count,
+            "units_sold": _number(total_units),
+            "average_order_value": _number(
+                total_revenue / order_count if order_count else 0
+            ),
+        },
+        "by_region": _group_totals(financial, "region"),
+        "by_product": _group_totals(financial, "product"),
+        "monthly_trend": _records(monthly),
+        "revenue_anomalies": _find_revenue_anomalies(financial),
+        "anomaly_method": (
+            "Individual order revenue outside 1.5 times the "
+            "interquartile range. These are flags for review, "
+            "not proof of errors or fraud."
+        ),
+    }
+
+
+def get_feedback_analytics(
+    filename: str | None = None,
+) -> dict:
+    df, source_file = load_processed_dataset(
+        "customer_feedback", filename
+    )
+
+    _require_columns(
+        df,
+        ["rating", "customer_segment", "region"],
+    )
+
+    df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
+    valid = df.dropna(subset=["rating"]).copy()
+
+    if valid.empty:
+        raise ValueError("No valid customer ratings were found.")
+
+    rating_distribution = (
+        valid.groupby("rating")
+        .size()
+        .rename("feedback_count")
+        .reset_index()
+        .sort_values("rating")
+    )
+
+    by_segment = (
+        valid.groupby("customer_segment", dropna=False)
+        .agg(
+            feedback_count=("rating", "size"),
+            average_rating=("rating", "mean"),
+        )
+        .reset_index()
+        .sort_values("average_rating", ascending=False)
+    )
+    by_segment["average_rating"] = by_segment[
+        "average_rating"
+    ].round(2)
+
+    by_region = (
+        valid.groupby("region", dropna=False)
+        .agg(
+            feedback_count=("rating", "size"),
+            average_rating=("rating", "mean"),
+        )
+        .reset_index()
+        .sort_values("average_rating", ascending=False)
+    )
+    by_region["average_rating"] = by_region[
+        "average_rating"
+    ].round(2)
+
+    result = {
+        "status": "success",
+        "source_file": source_file,
+        "data_quality": {
+            "source_rows": int(len(df)),
+            "valid_rating_rows": int(len(valid)),
+            "rows_without_valid_rating": int(len(df) - len(valid)),
+        },
+        "kpis": {
+            "feedback_count": int(len(valid)),
+            "average_rating": _number(valid["rating"].mean()),
+            "ratings_4_or_above_percent": _number(
+                (valid["rating"] >= 4).mean() * 100
+            ),
+        },
+        "rating_distribution": _records(rating_distribution),
+        "by_customer_segment": _records(by_segment),
+        "by_region": _records(by_region),
+    }
+
+    if "feedback" in valid.columns:
+        result["feedback_text_available"] = int(
+            valid["feedback"].notna().sum()
+        )
+
+    return result

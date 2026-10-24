@@ -1,0 +1,11 @@
+﻿order_id,order_date,region,product,quantity,unit_price,cost
+ORD001,2026-01-05,Chennai,Laptop,2,55000,42000
+ORD002,2026-01-08,Bengaluru,Monitor,5,12000,8500
+ORD003,2026-01-12,Chennai,Keyboard,10,1500,700
+ORD004,2026-02-03,Hyderabad,Laptop,1,56000,43000
+ORD005,2026-02-10,Bengaluru,Monitor,3,12500,8700
+ORD006,2026-02-15,Chennai,Mouse,12,800,350
+ORD007,2026-03-01,Hyderabad,Laptop,2,54000,41500
+ORD008,2026-03-05,Chennai,Monitor,4,11800,8400
+ORD009,2026-03-10,Bengaluru,Keyboard,8,1600,750
+ORD010,2026-03-15,Hyderabad,Mouse,15,850,360

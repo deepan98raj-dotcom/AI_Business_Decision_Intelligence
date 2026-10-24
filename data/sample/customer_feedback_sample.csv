@@ -1,0 +1,11 @@
+﻿feedback_id,feedback_date,customer_segment,region,rating,feedback
+FB001,2026-01-05,Enterprise,Chennai,5,Excellent product quality and fast delivery
+FB002,2026-01-08,Consumer,Bengaluru,2,Delivery was delayed and support did not respond
+FB003,2026-01-12,Small Business,Chennai,4,Good value for money
+FB004,2026-02-03,Enterprise,Hyderabad,1,Product arrived damaged
+FB005,2026-02-10,Consumer,Bengaluru,5,Very happy with the purchase
+FB006,2026-02-15,Small Business,Chennai,3,Average experience but pricing is reasonable
+FB007,2026-03-01,Enterprise,Hyderabad,2,Support resolution took too long
+FB008,2026-03-05,Consumer,Chennai,4,Good product but packaging could improve
+FB009,2026-03-10,Small Business,Bengaluru,5,Easy ordering and reliable service
+FB010,2026-03-15,Consumer,Hyderabad,2,The product stopped working after a few days
